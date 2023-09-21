@@ -1,0 +1,260 @@
+from snakemake.utils import min_version
+min_version("7.0")
+
+
+from snakemake.remote.FTP import RemoteProvider as FTPRemoteProvider
+from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
+
+from urllib.request import urlopen
+from urllib.error import URLError
+
+import gzip
+import re
+
+try:
+    response = urlopen('https://www.google.com/', timeout=10)
+    iconnect = True
+except URLError as ex:
+    iconnect = False
+
+class dummyprovider:
+    def remote(string_, allow_redirects="foo", immediate_close="bar"):
+        return string_
+
+if iconnect: # and not ('nointernet' in config and config['nointernet']):
+    FTP = FTPRemoteProvider()
+    HTTP = HTTPRemoteProvider()
+else:
+    FTP = dummyprovider
+    HTTP = dummyprovider
+
+wildcard_constraints:
+    chrom = r'[0-9XYMT]+',
+
+resourcedir = ('raw.githubusercontent.com/odelaneau/shapeit5/' +
+               '1f54cdb0fc3d6822f0fe2c43342ef9e18b4ce498/resources/')
+
+checkpoint download_chunk_b38:
+    input: HTTP.remote(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt')
+    output: 'resources/shapeit/chunks/b38/{size}/chunks_chr{chrom}.txt'
+    resources:
+        mem_mb = 4000,
+        time_min = 30
+    shell: 'cp {input} {output}'
+
+rule download_map:
+    input: HTTP.remote(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz')
+    output: 'resources/shapeit/maps/chr{chrom}.{build}.gmap.gz'
+    resources:
+        mem_mb = 4000,
+        time_min = 30
+    shell: 'cp {input} {output}'
+
+def input_anac(fname):
+    # check if the file has AN and AC in the header
+    an = False
+    ac = False
+    with gzip.open(fname, 'rt') as f:
+        for line in f:
+            processed = line.strip()
+            if re.search(r'^#CHROM', processed):
+                return bool(an and ac)
+            if not an:
+              an = re.search(r'^##INFO=<ID=AN,.+', processed)
+            if not ac:
+              ac = re.search(r'^##INFO=<ID=AC,.+', processed)
+
+rule shapeit_filter:
+    input: '{genotypes}.chr{chrom}.vcf.gz'
+    output: temp('temp/shapeit_filtered/{genotypes}.chr{chrom}.filtered.bcf')
+    threads: 2
+    resources:
+        mem_mb = 4000,
+        walltime = '48:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: '''
+bcftools view -Ob -o {output} -i 'F_MISSING < 0.1 && FILTER = "PASS" && MAC > 0' {input}
+'''
+
+rule shapeit_ac:
+    input: rules.shapeit_filter.output,
+    output: temp('temp/shapeit_filtered/{genotypes}.chr{chrom}.filtered.withac.bcf')
+    threads: 2
+    resources:
+        mem_mb = 4000,
+        walltime = '16:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: '''
+bcftools +fill-tags {input} -Ob -o {output} -- -t AN,AC
+'''
+
+def annaotate_or_not(wc):
+    if input_anac(f'{wc.genotypes}.chr{wc.chrom}.vcf.gz'):
+        return f'temp/shapeit_filtered/{wc.genotypes}.chr{wc.chrom}.filtered.bcf'
+    else:
+        return f'temp/shapeit_filtered/{wc.genotypes}.chr{wc.chrom}.filtered.withac.bcf'
+
+rule shapeit_commonvar_chunked:
+    input:
+        geno = annaotate_or_not, # '{genotypes}.chr{chrom}.withac.bcf', #TODO: replace
+        index = lambda wc: annaotate_or_not(wc) + '.csi', # {genotypes}.chr{chrom}.withac.bcf.csi', #TODO: replace
+        map = 'resources/shapeit/maps/chr{chrom}.b38.gmap.gz'
+    params:
+        region = lambda wc: re.sub("_", ":", wc.chunk)
+    output: temp('temp/shapeit_commonvar_chunked/{genotypes}.chr{chrom}.chunk__{chunk}.phased_common.bcf')
+    log: 'logs/{genotypes}.chr{chrom}.chunk__{chunk}.phased_common.log'
+    threads: 42
+    resources:
+        mem_mb = 4000,
+        walltime = '96:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: '''
+SHAPEIT5_phase_common \
+  --input {input.geno} \
+  --region {params.region} \
+  --map {input.map} \
+  --output {output} \
+  --log {log} \
+  --thread {threads} \
+  --filter-maf 0.001
+'''
+
+rule index_vcf:
+    input: '{vcffile}.vcf.gz'
+    output: '{vcffile}.vcf.gz.tbi'
+    resources:
+        mem_mb = 4000,
+        walltime = '4:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: 'bcftools index -tf {input}'
+
+rule index_bcf:
+    input: '{vcffile}.bcf'
+    output: '{vcffile}.bcf.csi'
+    resources:
+        mem_mb = 4000,
+        walltime = '4:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: 'bcftools index -f {input}'
+
+def getchunks(wc, size):
+    chunks = {'buf': [], 'unbuf': []}
+    cp = checkpoints.download_chunk_b38.get(
+        genotypes = wc.genotypes, size = size, chrom = wc.chrom)
+    with cp.output[0].open() as f:
+        for line in f:
+            proc = line.strip().split('\t')
+            unbuffered = re.sub(":", "_", proc[3])
+            buffered = re.sub(":", "_", proc[2])
+            chunks['buf'].append(buffered)
+            chunks['unbuf'].append(unbuffered)
+    return chunks
+
+def getchunks_common(wc):
+    chunks = getchunks(wc, '20cM')['buf']
+    stem = f'{wc.genotypes}.chr{wc.chrom}'
+    files = [f'temp/shapeit_commonvar_chunked/{stem}.chunk__{x}.phased_common.bcf' for x in chunks]
+    return files
+
+rule shapeit_commonvar_ligate:
+    input:
+        vcf = getchunks_common,
+        csi = lambda wc: [x + '.csi' for x in getchunks_common(wc)]
+    output:
+        file_list = temp('temp/shapeit_commonvar_merged/file_list.{genotypes}.chr{chrom}.txt'),
+        phased = temp('temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf')
+    threads: 2
+    resources:
+        mem_mb = 4000,
+        walltime = '96:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: r'''
+echo {input.vcf} | tr ' ' '\n' > {output.file_list}
+SHAPEIT5_ligate --input {output.file_list} \
+  --output {output.phased} --thread {threads}
+'''
+
+checkpoint check_hasrare:
+    input: rules.shapeit_commonvar_chunked.input.geno
+    output: 'temp/shapeit_filtered/{genotypes}.chr{chrom}.rare_records'
+    threads: 1
+    resources:
+        mem_mb = 4000,
+        walltime = '1:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: r'''
+bcftools view -i 'MAF < 0.001' {input} | \
+  bcftools stats | \
+  awk -F '\t' '$1 == "SN" && $3 ~ "records" {{print $4}}' > {output}
+'''
+
+rule shapeit_rarevar_chunked:
+    input:
+        geno = annaotate_or_not,
+        index = lambda wc: annaotate_or_not(wc) + '.csi',
+        map = 'resources/shapeit/maps/chr{chrom}.b38.gmap.gz',
+        scaf = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf',
+        scaf_index = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf.csi'
+    params:
+        region = lambda wc: re.sub("_", ":", wc.rarechunk),
+        region_scaf = lambda wc: re.sub("_", ":", wc.scaffchunk)
+    output: temp('temp/shapeit_rarevar_chunked/{genotypes}.chr{chrom}.chunk__{rarechunk}.scaffchunk__{scaffchunk}.phased_rare.bcf'),
+    log: 'logs/{genotypes}.chr{chrom}.chunk__{rarechunk}.scaffchunk__{scaffchunk}.phased_rare.log'
+    conda: 'envs/shapeit5.yaml'
+    threads: 42
+    resources:
+        mem_mb = 4000,
+        walltime = '24:00'
+    shell: '''
+# SHAPEIT5_phase_rare
+
+workflow/phase_rare_static_2c9e551 \
+  --input {input.geno} \
+  --map {input.map} \
+  --output {output} \
+  --thread {threads} \
+  --log {log} \
+  --scaffold {input.scaf} \
+  --scaffold-region {params.region_scaf} \
+  --input-region {params.region} \
+'''
+
+def getchunks_rare(wc):
+    chunks = getchunks(wc, '4cM')
+    stem = f'{wc.genotypes}.chr{wc.chrom}'
+    chunktxt = [f'chunk__{x}.scaffchunk__{y}' for x, y in
+                zip(chunks['unbuf'], chunks['buf'])]
+    return [f'temp/shapeit_rarevar_chunked/{stem}.{x}.phased_rare.bcf' for x in chunktxt]
+    return files
+
+rule shapeit_rarevar_ligate:
+    input:
+        vcf = getchunks_rare,
+        csi = lambda wc: [x + '.csi' for x in getchunks_rare(wc)]
+    output: temp('temp/shapeit_rarevar_merged/{genotypes}.chr{chrom}.phased_rare.bcf')
+    threads: 2
+    resources:
+        mem_mb = 4000,
+        walltime = '24:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: 'bcftools concat --naive -Ob -o {output} {input.vcf}'
+
+def common_or_rare(wc):
+    cp = checkpoints.check_hasrare.get(
+        genotypes = wc.genotypes, chrom = wc.chrom)
+    with cp.output[0].open() as f:
+        has_records = int(f.readline().strip()) > 0
+    if has_records:
+        return rules.shapeit_rarevar_ligate.output
+    else:
+        return rules.shapeit_commonvar_ligate.output.phased
+
+rule convert_phased:
+    input: common_or_rare
+    output: '{genotypes}.chr{chrom}.phased.vcf.gz'
+    threads: 2
+    resources:
+        mem_mb = 4000,
+        walltime = '24:00'
+    conda: 'envs/shapeit5.yaml'
+    shell: 'bcftools view -Oz -o {output} {input}'    

@@ -1,0 +1,7 @@
+temp/
+.snakemake/
+logs/
+resources/
+raw.githubusercontent.com/
+ADSP*
+adsp*
