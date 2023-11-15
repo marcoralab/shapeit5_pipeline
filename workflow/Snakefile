@@ -119,14 +119,14 @@ SHAPEIT5_phase_common \
   --filter-maf 0.001
 '''
 
-rule index_vcf:
-    input: '{vcffile}.vcf.gz'
-    output: '{vcffile}.vcf.gz.tbi'
-    resources:
-        mem_mb = 4000,
-        walltime = '4:00'
-    conda: 'envs/shapeit5.yaml'
-    shell: 'bcftools index -tf {input}'
+# rule index_vcf:
+#     input: '{vcffile}.vcf.gz'
+#     output: '{vcffile}.vcf.gz.tbi'
+#     resources:
+#         mem_mb = 4000,
+#         walltime = '4:00'
+#     conda: 'envs/shapeit5.yaml'
+#     shell: 'bcftools index -tf {input}'
 
 rule index_bcf:
     input: '{vcffile}.bcf'
