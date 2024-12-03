@@ -52,6 +52,8 @@ rule download_map:
 
 def input_anac(fname):
     # check if the file has AN and AC in the header
+    if 'AC' in config:
+        return config['AC']
     an = False
     ac = False
     with gzip.open(fname, 'rt') as f:
@@ -180,7 +182,7 @@ checkpoint check_hasrare:
     threads: 1
     resources:
         mem_mb = 4000,
-        walltime = '1:00'
+        walltime = '24:00'
     conda: 'envs/shapeit5.yaml'
     shell: r'''
 bcftools view -i 'MAF < 0.001' {input} | \
