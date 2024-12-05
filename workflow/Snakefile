@@ -75,7 +75,7 @@ rule shapeit_filter:
         walltime = '48:00'
     conda: 'envs/shapeit5.yaml'
     shell: '''
-bcftools view -Ob -o {output} -i 'F_MISSING < 0.1 && FILTER = "PASS" && MAC > 0' {input}
+bcftools view -Ob -o {output} -i 'F_MISSING < 0.1 && (FILTER = "PASS" || FILTER = ".") && MAC > 0' {input}
 '''
 
 rule shapeit_ac:
@@ -245,8 +245,8 @@ def common_or_rare(wc):
     cp = checkpoints.check_hasrare.get(
         genotypes = wc.genotypes, chrom = wc.chrom)
     with cp.output[0].open() as f:
-        has_records = int(f.readline().strip()) > 0
-    if has_records:
+        has_many_records = int(f.readline().strip()) > 500
+    if has_many_records:
         return rules.shapeit_rarevar_ligate.output
     else:
         return rules.shapeit_commonvar_ligate.output.phased
