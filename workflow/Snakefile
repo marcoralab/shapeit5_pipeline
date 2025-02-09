@@ -167,8 +167,10 @@ rule shapeit_commonvar_ligate:
         phased = temp('temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '96:00'
+        #mem_mb = 4000,
+        mem_mb = 8000,
+        #walltime = '96:00'
+        time_min = 5760,
     conda: 'envs/shapeit5.yaml'
     shell: r'''
 echo {input.vcf} | tr ' ' '\n' > {output.file_list}
@@ -182,7 +184,8 @@ checkpoint check_hasrare:
     threads: 1
     resources:
         mem_mb = 4000,
-        walltime = '24:00'
+        #walltime = '24:00'
+        time_min = 1440
     conda: 'envs/shapeit5.yaml'
     shell: r'''
 bcftools view -i 'MAF < 0.001' {input} | \
@@ -205,8 +208,10 @@ rule shapeit_rarevar_chunked:
     conda: 'envs/shapeit5.yaml'
     threads: 42
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        #mem_mb = 4000,
+        mem_mb = 168000,
+        #walltime = '24:00'
+        time_min = 1440
     shell: '''
 # SHAPEIT5_phase_rare
 
@@ -236,8 +241,10 @@ rule shapeit_rarevar_ligate:
     output: temp('temp/shapeit_rarevar_merged/{genotypes}.chr{chrom}.phased_rare.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        #mem_mb = 4000,
+        mem_mb = 8000,
+        #walltime = '24:00'
+        time_min = 1440
     conda: 'envs/shapeit5.yaml'
     shell: 'bcftools concat --naive -Ob -o {output} {input.vcf}'
 
@@ -256,7 +263,9 @@ rule convert_phased:
     output: '{genotypes}.chr{chrom}.phased.vcf.gz'
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        #mem_mb = 4000,
+        mem_mb = 8000,
+        #walltime = '24:00'
+        time_min = 1440
     conda: 'envs/shapeit5.yaml'
     shell: 'bcftools view -Oz -o {output} {input}'    
