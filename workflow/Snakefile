@@ -1,41 +1,29 @@
 from snakemake.utils import min_version
-min_version("7.0")
-
-
-from snakemake.remote.FTP import RemoteProvider as FTPRemoteProvider
-from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
-
-from urllib.request import urlopen
-from urllib.error import URLError
+min_version("8.0")
 
 import gzip
 import re
+from urllib.request import urlopen
+from urllib.error import URLError
 
-try:
-    response = urlopen('https://www.google.com/', timeout=10)
-    iconnect = True
-except URLError as ex:
-    iconnect = False
-
-class dummyprovider:
-    def remote(string_, allow_redirects="foo", immediate_close="bar"):
-        return string_
-
-if iconnect: # and not ('nointernet' in config and config['nointernet']):
-    FTP = FTPRemoteProvider()
-    HTTP = HTTPRemoteProvider()
-else:
-    FTP = dummyprovider
-    HTTP = dummyprovider
+iconnect = False
+if not ('nointernet' in config and config['nointernet']):
+    try:
+        response = urlopen('https://www.google.com/', timeout=10)
+        iconnect = True
+    except URLError as ex:
+        pass
+ftp = storage.ftp if iconnect else lambda x: x
+http = storage.http if iconnect else lambda x: x
 
 wildcard_constraints:
     chrom = r'[0-9XYMT]+',
 
-resourcedir = ('raw.githubusercontent.com/odelaneau/shapeit5/' +
+resourcedir = ('https://raw.githubusercontent.com/odelaneau/shapeit5/' +
                '1f54cdb0fc3d6822f0fe2c43342ef9e18b4ce498/resources/')
 
 checkpoint download_chunk_b38:
-    input: HTTP.remote(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt')
+    input: http(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt')
     output: 'resources/shapeit/chunks/b38/{size}/chunks_chr{chrom}.txt'
     resources:
         mem_mb = 4000,
@@ -43,7 +31,7 @@ checkpoint download_chunk_b38:
     shell: 'cp {input} {output}'
 
 rule download_map:
-    input: HTTP.remote(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz')
+    input: http(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz')
     output: 'resources/shapeit/maps/chr{chrom}.{build}.gmap.gz'
     resources:
         mem_mb = 4000,
@@ -71,20 +59,20 @@ rule shapeit_filter:
     output: temp('temp/shapeit_filtered/{genotypes}.chr{chrom}.filtered.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '48:00'
+        mem_mb = 8000,
+        runtime = "48h"
     conda: 'envs/shapeit5.yaml'
     shell: '''
 bcftools view -Ob -o {output} -i 'F_MISSING < 0.1 && (FILTER = "PASS" || FILTER = ".") && MAC > 0' {input}
 '''
 
 rule shapeit_ac:
-    input: rules.shapeit_filter.output,
+    input: rules.shapeit_filter.output
     output: temp('temp/shapeit_filtered/{genotypes}.chr{chrom}.filtered.withac.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '16:00'
+        mem_mb = 8000,
+        runtime = "16h"
     conda: 'envs/shapeit5.yaml'
     shell: '''
 bcftools +fill-tags {input} -Ob -o {output} -- -t AN,AC
@@ -107,8 +95,8 @@ rule shapeit_commonvar_chunked:
     log: 'logs/{genotypes}.chr{chrom}.chunk__{chunk}.phased_common.log'
     threads: 42
     resources:
-        mem_mb = 4000,
-        walltime = '96:00'
+        mem_mb = 168000,
+        runtime = "96h"
     conda: 'envs/shapeit5.yaml'
     shell: '''
 SHAPEIT5_phase_common \
@@ -125,7 +113,7 @@ SHAPEIT5_phase_common \
 #     input: '{vcffile}.vcf.gz'
 #     output: '{vcffile}.vcf.gz.tbi'
 #     resources:
-#         mem_mb = 4000,
+#         mem_mb = 168000,
 #         walltime = '4:00'
 #     conda: 'envs/shapeit5.yaml'
 #     shell: 'bcftools index -tf {input}'
@@ -135,7 +123,7 @@ rule index_bcf:
     output: '{vcffile}.bcf.csi'
     resources:
         mem_mb = 4000,
-        walltime = '4:00'
+        runtime = "4h"
     conda: 'envs/shapeit5.yaml'
     shell: 'bcftools index -f {input}'
 
@@ -167,8 +155,8 @@ rule shapeit_commonvar_ligate:
         phased = temp('temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '96:00'
+        mem_mb = 8000,
+        runtime = "96h"
     conda: 'envs/shapeit5.yaml'
     shell: r'''
 echo {input.vcf} | tr ' ' '\n' > {output.file_list}
@@ -182,7 +170,7 @@ checkpoint check_hasrare:
     threads: 1
     resources:
         mem_mb = 4000,
-        walltime = '24:00'
+        runtime = "24h"
     conda: 'envs/shapeit5.yaml'
     shell: r'''
 bcftools view -i 'MAF < 0.001' {input} | \
@@ -205,8 +193,8 @@ rule shapeit_rarevar_chunked:
     conda: 'envs/shapeit5.yaml'
     threads: 42
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        mem_mb = 168000,
+        runtime = "24h"
     shell: '''
 # SHAPEIT5_phase_rare
 
@@ -236,8 +224,8 @@ rule shapeit_rarevar_ligate:
     output: temp('temp/shapeit_rarevar_merged/{genotypes}.chr{chrom}.phased_rare.bcf')
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        mem_mb = 32000,
+        runtime = "48h"
     conda: 'envs/shapeit5.yaml'
     shell: 'bcftools concat --naive -Ob -o {output} {input.vcf}'
 
@@ -251,12 +239,19 @@ def common_or_rare(wc):
     else:
         return rules.shapeit_commonvar_ligate.output.phased
 
+if "outfile" in config and config["outfile"]:
+    outfile = config["outfile"]
+else:
+    outfile = False
+
 rule convert_phased:
     input: common_or_rare
-    output: '{genotypes}.chr{chrom}.phased.vcf.gz'
+    output: outfile if outfile else '{genotypes}.chr{chrom}.phased.vcf.gz'
     threads: 2
     resources:
-        mem_mb = 4000,
-        walltime = '24:00'
+        mem_mb = 8000,
+        runtime = "24h"
     conda: 'envs/shapeit5.yaml'
-    shell: 'bcftools view -Oz -o {output} {input}'    
+    shell: 'bcftools view -Oz -o {output} {input}'
+
+### Processed by update_sm8plus.py for Snakemake 8+ ###
