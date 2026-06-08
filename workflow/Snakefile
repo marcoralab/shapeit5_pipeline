@@ -83,7 +83,7 @@ rule shapeit_ac:
 bcftools +fill-tags {input} -Ob -o {output} -- -t AN,AC
 '''
 
-def annaotate_or_not(wc):
+def annotate_or_not(wc):
     if input_anac(f'{wc.genotypes}.chr{wc.chrom}.vcf.gz'):
         return f'temp/shapeit_filtered/{wc.genotypes}.chr{wc.chrom}.filtered.bcf'
     else:
@@ -91,8 +91,8 @@ def annaotate_or_not(wc):
 
 rule shapeit_commonvar_chunked:
     input:
-        geno = annaotate_or_not, # '{genotypes}.chr{chrom}.withac.bcf', #TODO: replace
-        index = lambda wc: annaotate_or_not(wc) + '.csi', # {genotypes}.chr{chrom}.withac.bcf.csi', #TODO: replace
+        geno = annotate_or_not, # '{genotypes}.chr{chrom}.withac.bcf', #TODO: replace
+        index = lambda wc: annotate_or_not(wc) + '.csi', # {genotypes}.chr{chrom}.withac.bcf.csi', #TODO: replace
         map = dir_resources + '/shapeit/maps/chr{chrom}.b38.gmap.gz'
     params:
         region = lambda wc: re.sub("_", ":", wc.chunk)
@@ -266,5 +266,104 @@ rule convert_phased:
         runtime = "24h"
     conda: 'envs/shapeit5.yaml'
     shell: 'bcftools view -Oz -o {output} {input}'
+
+### Processed by update_sm8plus.py for Snakemake 8+ ###
+
+use rule shapeit_filter as shapeit_filter_simple with:
+    input: '{genotypes}.vcf.gz'
+    output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.bcf')
+
+use rule shapeit_ac as shapeit_ac_simple with:
+    input: rules.shapeit_filter_simple.output
+    output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.withac.bcf')
+
+def annotate_or_not_simple(wc):
+    if input_anac(f'{wc.genotypes}.vcf.gz'):
+        return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.bcf'
+    else:
+        return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.withac.bcf'
+
+def choose_map_simple(wc):
+    chrom = re.search(r'chr?([0-9XYMT]+)', wc.genotypes).group(1)
+    return dir_resources + f'/shapeit/maps/chr{chrom}.b38.gmap.gz'
+
+rule shapeit_commonvar_simple:
+    input:
+        geno = annotate_or_not_simple,
+        index = lambda wc: annotate_or_not_simple(wc) + '.csi',
+        map = choose_map_simple
+    output: temp('temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf')
+    log: 'logs/{genotypes}.phased_common.log'
+    threads: 42
+    resources:
+        mem_mb = 168000,
+        runtime = "96h"
+    conda: 'envs/shapeit5.yaml'
+    shell: '''
+SHAPEIT5_phase_common \
+  --input {input.geno} \
+  --map {input.map} \
+  --output {output} \
+  --log {log} \
+  --thread {threads} \
+  --filter-maf 0.001
+'''
+
+checkpoint check_hasrare_simple:
+    input: rules.shapeit_commonvar_simple.input.geno
+    output: 'temp/shapeit_filtered_simple/{genotypes}.rare_records'
+    threads: 1
+    resources:
+        mem_mb = 4000,
+        runtime = "24h"
+    conda: 'envs/shapeit5.yaml'
+    shell: r'''
+bcftools view -i 'MAF < 0.001' {input} | \
+  bcftools stats | \
+  awk -F '\t' '$1 == "SN" && $3 ~ "records" {{print $4}}' > {output}
+'''
+
+rule shapeit_rarevar_simple:
+    input:
+        geno = annotate_or_not_simple,
+        index = lambda wc: annotate_or_not_simple(wc) + '.csi',
+        map = choose_map_simple,
+        scaf = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf',
+        scaf_index = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf.csi'
+    params:
+        region = lambda wc: re.sub("_", ":", wc.rarechunk),
+        region_scaf = lambda wc: re.sub("_", ":", wc.scaffchunk)
+    output: temp('temp/shapeit_rarevar_simple/{genotypes}.phased_rare.bcf'),
+    log: 'logs/{genotypes}.phased_rare.log'
+    conda: 'envs/shapeit5.yaml'
+    threads: 42
+    resources:
+        mem_mb = 168000,
+        runtime = "24h"
+    shell: '''
+# SHAPEIT5_phase_rare
+
+workflow/phase_rare_static_2c9e551 \
+  --input {input.geno} \
+  --map {input.map} \
+  --output {output} \
+  --thread {threads} \
+  --log {log} \
+  --scaffold {input.scaf}
+'''
+
+def common_or_rare_simple(wc):
+    cp = checkpoints.check_hasrare_simple.get(
+        genotypes = wc.genotypes, chrom = wc.chrom)
+    with cp.output[0].open() as f:
+        has_many_records = int(f.readline().strip()) > 500
+    if has_many_records:
+        return rules.shapeit_rarevar_simple.output
+    else:
+        return rules.shapeit_commonvar_simple.output.phased
+
+use rule convert_phased as convert_phased_simple with:
+    input: common_or_rare_simple
+    output: outfile if outfile else '{genotypes}.phased.vcf.gz'
 
 ### Processed by update_sm8plus.py for Snakemake 8+ ###
