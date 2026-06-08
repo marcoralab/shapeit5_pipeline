@@ -354,7 +354,7 @@ workflow/phase_rare_static_2c9e551 \
 
 def common_or_rare_simple(wc):
     cp = checkpoints.check_hasrare_simple.get(
-        genotypes = wc.genotypes, chrom = wc.chrom)
+        genotypes = wc.genotypes)
     with cp.output[0].open() as f:
         has_many_records = int(f.readline().strip()) > 500
     if has_many_records:
