@@ -193,8 +193,8 @@ bcftools view -i 'MAF < 0.001' {input} | \
 
 rule shapeit_rarevar_chunked:
     input:
-        geno = annaotate_or_not,
-        index = lambda wc: annaotate_or_not(wc) + '.csi',
+        geno = annotate_or_not,
+        index = lambda wc: annotate_or_not(wc) + '.csi',
         map = dir_resources + '/shapeit/maps/chr{chrom}.b38.gmap.gz',
         scaf = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf',
         scaf_index = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf.csi'
