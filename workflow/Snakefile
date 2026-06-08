@@ -3,40 +3,45 @@ min_version("8.0")
 
 import gzip
 import re
+from pathlib import Path
 from urllib.request import urlopen
 from urllib.error import URLError
-
-iconnect = False
-if not ('nointernet' in config and config['nointernet']):
-    try:
-        response = urlopen('https://www.google.com/', timeout=10)
-        iconnect = True
-    except URLError as ex:
-        pass
-ftp = storage.ftp if iconnect else lambda x: x
-http = storage.http if iconnect else lambda x: x
 
 wildcard_constraints:
     chrom = r'[0-9XYMT]+',
 
-resourcedir = ('https://raw.githubusercontent.com/odelaneau/shapeit5/' +
-               '1f54cdb0fc3d6822f0fe2c43342ef9e18b4ce498/resources/')
+dir_resources = str(Path(config.get("resource_dir", "resources")))
+download_resources = dir_resources == "resources"
 
-checkpoint download_chunk_b38:
-    input: http(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt')
-    output: 'resources/shapeit/chunks/b38/{size}/chunks_chr{chrom}.txt'
-    resources:
-        mem_mb = 4000,
-        time_min = 30
-    shell: 'cp {input} {output}'
+if download_resources:
+    iconnect = False
+    if not ('nointernet' in config and config['nointernet']):
+        try:
+            response = urlopen('https://www.google.com/', timeout=10)
+            iconnect = True
+        except URLError as ex:
+            pass
+    ftp = storage.ftp if iconnect else lambda x: x
+    http = storage.http if iconnect else lambda x: x
 
-rule download_map:
-    input: http(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz')
-    output: 'resources/shapeit/maps/chr{chrom}.{build}.gmap.gz'
-    resources:
-        mem_mb = 4000,
-        time_min = 30
-    shell: 'cp {input} {output}'
+    resourcedir = ('https://raw.githubusercontent.com/odelaneau/shapeit/' +
+                   'f9d726472df3f26120fe738a137fc41cbcc0bbf4/resources/')
+    
+    checkpoint download_chunk_b38:
+        input: ancient(http(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt'))
+        output: 'resources/shapeit/chunks/b38/{size}/chunks_chr{chrom}.txt'
+        resources:
+            mem_mb = 4000,
+            time_min = 30
+        shell: 'cp {input} {output}'
+    
+    rule download_map:
+        input: ancient(http(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz'))
+        output: 'resources/shapeit/maps/chr{chrom}.{build}.gmap.gz'
+        resources:
+            mem_mb = 4000,
+            time_min = 30
+        shell: 'cp {input} {output}'
 
 def input_anac(fname):
     # check if the file has AN and AC in the header
@@ -88,7 +93,7 @@ rule shapeit_commonvar_chunked:
     input:
         geno = annaotate_or_not, # '{genotypes}.chr{chrom}.withac.bcf', #TODO: replace
         index = lambda wc: annaotate_or_not(wc) + '.csi', # {genotypes}.chr{chrom}.withac.bcf.csi', #TODO: replace
-        map = 'resources/shapeit/maps/chr{chrom}.b38.gmap.gz'
+        map = dir_resources + '/shapeit/maps/chr{chrom}.b38.gmap.gz'
     params:
         region = lambda wc: re.sub("_", ":", wc.chunk)
     output: temp('temp/shapeit_commonvar_chunked/{genotypes}.chr{chrom}.chunk__{chunk}.phased_common.bcf')
@@ -129,9 +134,17 @@ rule index_bcf:
 
 def getchunks(wc, size):
     chunks = {'buf': [], 'unbuf': []}
-    cp = checkpoints.download_chunk_b38.get(
-        genotypes = wc.genotypes, size = size, chrom = wc.chrom)
-    with cp.output[0].open() as f:
+    if download_resources:
+        cp = checkpoints.download_chunk_b38.get(
+            genotypes = wc.genotypes, size = size, chrom = wc.chrom
+        )
+        chunkf = cp.output[0]
+    else:
+        chunkf = (
+            Path(dir_resources) / "shapeit" / "chunks" /
+             "b38" / size / f"chunks_chr{wc.chrom}.txt"
+        )
+    with chunkf.open() as f:
         for line in f:
             proc = line.strip().split('\t')
             unbuffered = re.sub(":", "_", proc[3])
@@ -182,7 +195,7 @@ rule shapeit_rarevar_chunked:
     input:
         geno = annaotate_or_not,
         index = lambda wc: annaotate_or_not(wc) + '.csi',
-        map = 'resources/shapeit/maps/chr{chrom}.b38.gmap.gz',
+        map = dir_resources + '/shapeit/maps/chr{chrom}.b38.gmap.gz',
         scaf = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf',
         scaf_index = 'temp/shapeit_commonvar_merged/{genotypes}.chr{chrom}.phased_common.bcf.csi'
     params:
