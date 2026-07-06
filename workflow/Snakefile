@@ -7,11 +7,18 @@ from pathlib import Path
 from urllib.request import urlopen
 from urllib.error import URLError
 
+configfile: "config/config.yaml"
+
 wildcard_constraints:
     chrom = r'[0-9XYMT]+',
 
 dir_resources = str(Path(config.get("resource_dir", "resources")))
 download_resources = dir_resources == "resources"
+filt_default = """-i 'F_MISSING < 0.1 && (FILTER = "PASS" || FILTER = ".") && MAC > 0'"""
+if "filter" in config.keys():
+    filt = config["filter"]
+else:
+    filt = filt_default
 
 if download_resources:
     iconnect = False
@@ -30,6 +37,7 @@ if download_resources:
     checkpoint download_chunk_b38:
         input: ancient(http(resourcedir + 'chunks/b38/{size}/chunks_chr{chrom}.txt'))
         output: 'resources/shapeit/chunks/b38/{size}/chunks_chr{chrom}.txt'
+        localrule: True
         resources:
             mem_mb = 4000,
             time_min = 30
@@ -38,6 +46,7 @@ if download_resources:
     rule download_map:
         input: ancient(http(resourcedir + 'maps/{build}/chr{chrom}.{build}.gmap.gz'))
         output: 'resources/shapeit/maps/chr{chrom}.{build}.gmap.gz'
+        localrule: True
         resources:
             mem_mb = 4000,
             time_min = 30
@@ -62,14 +71,14 @@ def input_anac(fname):
 rule shapeit_filter:
     input: '{genotypes}.chr{chrom}.vcf.gz'
     output: temp('temp/shapeit_filtered/{genotypes}.chr{chrom}.filtered.bcf')
-    threads: 2
+    params:
+        filter = filt
+    threads: 3
     resources:
         mem_mb = 8000,
         runtime = "48h"
     conda: 'envs/shapeit5.yaml'
-    shell: '''
-bcftools view -Ob -o {output} -i 'F_MISSING < 0.1 && (FILTER = "PASS" || FILTER = ".") && MAC > 0' {input}
-'''
+    shell: "bcftools view -Ob -o {output} {params.filter} --threads 3 {input}"
 
 rule shapeit_ac:
     input: rules.shapeit_filter.output
@@ -268,38 +277,38 @@ rule convert_phased:
     shell: 'bcftools view -Oz -o {output} {input}'
 
 ### Processed by update_sm8plus.py for Snakemake 8+ ###
+if config.get("simple", False):
+    use rule shapeit_filter as shapeit_filter_simple with:
+        input: '{genotypes}.vcf.gz'
+        output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.bcf')
 
-use rule shapeit_filter as shapeit_filter_simple with:
-    input: '{genotypes}.vcf.gz'
-    output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.bcf')
+    use rule shapeit_ac as shapeit_ac_simple with:
+        input: rules.shapeit_filter_simple.output
+        output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.withac.bcf')
 
-use rule shapeit_ac as shapeit_ac_simple with:
-    input: rules.shapeit_filter_simple.output
-    output: temp('temp/shapeit_filtered_simple/{genotypes}.filtered.withac.bcf')
+    def annotate_or_not_simple(wc):
+        if input_anac(f'{wc.genotypes}.vcf.gz'):
+            return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.bcf'
+        else:
+            return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.withac.bcf'
 
-def annotate_or_not_simple(wc):
-    if input_anac(f'{wc.genotypes}.vcf.gz'):
-        return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.bcf'
-    else:
-        return f'temp/shapeit_filtered_simple/{wc.genotypes}.filtered.withac.bcf'
+    def choose_map_simple(wc):
+        chrom = re.search(r'chr?([0-9XYMT]+)', wc.genotypes).group(1)
+        return dir_resources + f'/shapeit/maps/chr{chrom}.b38.gmap.gz'
 
-def choose_map_simple(wc):
-    chrom = re.search(r'chr?([0-9XYMT]+)', wc.genotypes).group(1)
-    return dir_resources + f'/shapeit/maps/chr{chrom}.b38.gmap.gz'
-
-rule shapeit_commonvar_simple:
-    input:
-        geno = annotate_or_not_simple,
-        index = lambda wc: annotate_or_not_simple(wc) + '.csi',
-        map = choose_map_simple
-    output: temp('temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf')
-    log: 'logs/{genotypes}.phased_common.log'
-    threads: 42
-    resources:
-        mem_mb = 168000,
-        runtime = "96h"
-    conda: 'envs/shapeit5.yaml'
-    shell: '''
+    rule shapeit_commonvar_simple:
+        input:
+            geno = annotate_or_not_simple,
+            index = lambda wc: annotate_or_not_simple(wc) + '.csi',
+            map = choose_map_simple
+        output: temp('temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf')
+        log: 'logs/{genotypes}.phased_common.log'
+        threads: 42
+        resources:
+            mem_mb = 168000,
+            runtime = "96h"
+        conda: 'envs/shapeit5.yaml'
+        shell: '''
 SHAPEIT5_phase_common \
   --input {input.geno} \
   --map {input.map} \
@@ -309,38 +318,38 @@ SHAPEIT5_phase_common \
   --filter-maf 0.001
 '''
 
-checkpoint check_hasrare_simple:
-    input: rules.shapeit_commonvar_simple.input.geno
-    output: 'temp/shapeit_filtered_simple/{genotypes}.rare_records'
-    threads: 1
-    resources:
-        mem_mb = 4000,
-        runtime = "24h"
-    conda: 'envs/shapeit5.yaml'
-    shell: r'''
+    checkpoint check_hasrare_simple:
+        input: rules.shapeit_commonvar_simple.input.geno
+        output: 'temp/shapeit_filtered_simple/{genotypes}.rare_records'
+        threads: 1
+        resources:
+            mem_mb = 4000,
+            runtime = "24h"
+        conda: 'envs/shapeit5.yaml'
+        shell: r'''
 bcftools view -i 'MAF < 0.001' {input} | \
   bcftools stats | \
   awk -F '\t' '$1 == "SN" && $3 ~ "records" {{print $4}}' > {output}
 '''
 
-rule shapeit_rarevar_simple:
-    input:
-        geno = annotate_or_not_simple,
-        index = lambda wc: annotate_or_not_simple(wc) + '.csi',
-        map = choose_map_simple,
-        scaf = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf',
-        scaf_index = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf.csi'
-    params:
-        region = lambda wc: re.sub("_", ":", wc.rarechunk),
-        region_scaf = lambda wc: re.sub("_", ":", wc.scaffchunk)
-    output: temp('temp/shapeit_rarevar_simple/{genotypes}.phased_rare.bcf'),
-    log: 'logs/{genotypes}.phased_rare.log'
-    conda: 'envs/shapeit5.yaml'
-    threads: 42
-    resources:
-        mem_mb = 168000,
-        runtime = "24h"
-    shell: '''
+    rule shapeit_rarevar_simple:
+        input:
+            geno = annotate_or_not_simple,
+            index = lambda wc: annotate_or_not_simple(wc) + '.csi',
+            map = choose_map_simple,
+            scaf = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf',
+            scaf_index = 'temp/shapeit_commonvar_simple/{genotypes}.phased_common.bcf.csi'
+        params:
+            region = lambda wc: re.sub("_", ":", wc.rarechunk),
+            region_scaf = lambda wc: re.sub("_", ":", wc.scaffchunk)
+        output: temp('temp/shapeit_rarevar_simple/{genotypes}.phased_rare.bcf'),
+        log: 'logs/{genotypes}.phased_rare.log'
+        conda: 'envs/shapeit5.yaml'
+        threads: 42
+        resources:
+            mem_mb = 168000,
+            runtime = "24h"
+        shell: '''
 # SHAPEIT5_phase_rare
 
 workflow/phase_rare_static_2c9e551 \
@@ -352,18 +361,18 @@ workflow/phase_rare_static_2c9e551 \
   --scaffold {input.scaf}
 '''
 
-def common_or_rare_simple(wc):
-    cp = checkpoints.check_hasrare_simple.get(
-        genotypes = wc.genotypes)
-    with cp.output[0].open() as f:
-        has_many_records = int(f.readline().strip()) > 500
-    if has_many_records:
-        return rules.shapeit_rarevar_simple.output
-    else:
-        return rules.shapeit_commonvar_simple.output.phased
+    def common_or_rare_simple(wc):
+        cp = checkpoints.check_hasrare_simple.get(
+            genotypes = wc.genotypes)
+        with cp.output[0].open() as f:
+            has_many_records = int(f.readline().strip()) > 500
+        if has_many_records:
+            return rules.shapeit_rarevar_simple.output
+        else:
+            return rules.shapeit_commonvar_simple.output.phased
 
-use rule convert_phased as convert_phased_simple with:
-    input: common_or_rare_simple
-    output: outfile if outfile else '{genotypes}.phased.vcf.gz'
+    use rule convert_phased as convert_phased_simple with:
+        input: common_or_rare_simple
+        output: outfile if outfile else '{genotypes}.phased.vcf.gz'
 
 ### Processed by update_sm8plus.py for Snakemake 8+ ###
